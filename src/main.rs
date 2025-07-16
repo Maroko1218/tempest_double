@@ -53,7 +53,7 @@ impl EventHandler for Handler {
         }
 
         if is_command {
-            handle_command(ctx.clone(), msg).await;
+            handle_command(ctx.clone(), msg, is_dm).await;
         } else {
             send_message(ctx.clone(), msg, is_dm).await;
         }
@@ -64,11 +64,18 @@ impl EventHandler for Handler {
     }
 }
 
-async fn handle_command(ctx: Context, msg: Message) {
+async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
     let mut ollama = Ollama::default();
     let mut data = ctx.data.write().await;
     let chat_history = data.get_mut::<ChatHistory>().unwrap();
     if msg.content.eq("!unregister") {
+        if is_dm {
+            let _ = msg.reply(
+                &ctx.http,
+                "Sorry, you can't unregister in DMs\nIf you want to reset the chat use: `!amnesia`",
+            ).await;
+            return;
+        }
         chat_history.remove(&msg.channel_id.get());
         let _ = msg.reply(&ctx.http, "Goodbye!").await;
     } else if msg.content.starts_with("!amnesia") {
