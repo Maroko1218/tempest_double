@@ -1,0 +1,10 @@
+[package]
+name = "tempest_double"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotenv = "0.15"
+serenity = "0.12"
+tokio = { version = "1.46", features = ["macros", "rt-multi-thread"] }
+ollama-rs = "0.3.2"
