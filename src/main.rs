@@ -35,14 +35,27 @@ impl EventHandler for Handler {
             Channel::Private(_) => true,
             _ => false,
         };
-        if !is_dm && channel.id().get() != 1383742335027773540 {
-            return;
+        let is_command = msg.content.starts_with("!");
+        {
+            let mut data = ctx.data.write().await;
+            let chat_history = data.get_mut::<ChatHistory>().unwrap();
+            if !is_dm && !chat_history.contains_key(&channel.id().get()) {
+                if is_command && msg.content.eq("!register") {
+                    let mut ollama = Ollama::default();
+                    chat_history
+                        .insert(msg.channel_id.get(), create_chat_history(&mut ollama).await);
+                    let _ = msg
+                        .reply(&ctx.http, "I will now respond to messages in this channel!")
+                        .await;
+                }
+                return;
+            }
         }
 
-        if msg.content.starts_with("!") {
-            handle_command(ctx, msg).await;
+        if is_command {
+            handle_command(ctx.clone(), msg).await;
         } else {
-            send_message(ctx, msg, is_dm).await;
+            send_message(ctx.clone(), msg, is_dm).await;
         }
     }
 
@@ -56,9 +69,6 @@ async fn handle_command(ctx: Context, msg: Message) {
     if msg.content.starts_with("!amnesia") {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        let mut old_vec = chat_history.remove(&msg.channel_id.get());
-        old_vec.take();
-        drop(old_vec);
         chat_history.insert(msg.channel_id.get(), create_chat_history(&mut ollama).await);
         let _ = msg.reply(&ctx.http, "Chat history has been reset!").await;
     } else if msg.content.starts_with("!setprompt ") {
