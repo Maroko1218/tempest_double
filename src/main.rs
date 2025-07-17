@@ -66,8 +66,6 @@ impl EventHandler for Handler {
 
 async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
     let mut ollama = Ollama::default();
-    let mut data = ctx.data.write().await;
-    let chat_history = data.get_mut::<ChatHistory>().unwrap();
     if msg.content.eq("!unregister") {
         if is_dm {
             let _ = msg.reply(
@@ -76,12 +74,18 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
             ).await;
             return;
         }
+        let mut data = ctx.data.write().await;
+        let chat_history = data.get_mut::<ChatHistory>().unwrap();
         chat_history.remove(&msg.channel_id.get());
         let _ = msg.reply(&ctx.http, "Goodbye!").await;
     } else if msg.content.starts_with("!amnesia") {
+        let mut data = ctx.data.write().await;
+        let chat_history = data.get_mut::<ChatHistory>().unwrap();
         chat_history.insert(msg.channel_id.get(), create_chat_history(&mut ollama).await);
         let _ = msg.reply(&ctx.http, "Chat history has been reset!").await;
     } else if msg.content.starts_with("!setprompt ") {
+        let mut data = ctx.data.write().await;
+        let chat_history = data.get_mut::<ChatHistory>().unwrap();
         let chat_history = chat_history
             .entry(msg.channel_id.get())
             .or_insert(create_chat_history(&mut ollama).await);
@@ -112,6 +116,16 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
         for message in discord_chat_history {
             let _ = message.delete(&ctx.http).await;
         }
+    } else if msg.content.eq("!regenerate") {
+        {
+            let mut data = ctx.data.write().await;
+            let chat_history = data.get_mut::<ChatHistory>().unwrap();
+            let chat_history = chat_history
+                .entry(msg.channel_id.get())
+                .or_insert(create_chat_history(&mut ollama).await);
+            chat_history.pop();
+        }
+        let _ = send_message(ctx.clone(), msg, is_dm).await;
     }
 }
 
