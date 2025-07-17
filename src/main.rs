@@ -1,9 +1,11 @@
+mod commands;
+
 use std::collections::HashMap;
 use std::env;
 
 use ollama_rs::Ollama;
+use ollama_rs::generation::chat::ChatMessage;
 use ollama_rs::generation::chat::request::ChatMessageRequest;
-use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 
 use serenity::all::{
     ActivityData, Channel, ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage,
@@ -35,25 +37,23 @@ impl EventHandler for Handler {
             Channel::Private(_) => true,
             _ => false,
         };
-        let is_command = msg.content.starts_with("!");
+        let possible_command = commands::parse_commands(msg.content.as_str());
+
+        let is_registered = {
+            let data = ctx.data.write().await;
+            data.get::<ChatHistory>()
+                .unwrap()
+                .contains_key(&channel.id().get())
+        };
+        if !is_dm
+            && !is_registered
+            && !matches!(possible_command, Some(commands::Command::Register))
         {
-            let mut data = ctx.data.write().await;
-            let chat_history = data.get_mut::<ChatHistory>().unwrap();
-            if !is_dm && !chat_history.contains_key(&channel.id().get()) {
-                if is_command && msg.content.eq("!register") {
-                    let mut ollama = Ollama::default();
-                    chat_history
-                        .insert(msg.channel_id.get(), create_chat_history(&mut ollama).await);
-                    let _ = msg
-                        .reply(&ctx.http, "I will now respond to messages in this channel!")
-                        .await;
-                }
-                return;
-            }
+            return;
         }
 
-        if is_command {
-            handle_command(ctx.clone(), msg, is_dm).await;
+        if possible_command.is_some() {
+            commands::handle_command(ctx.clone(), msg, possible_command.unwrap(), is_dm).await;
         } else {
             send_message(ctx.clone(), msg, is_dm).await;
         }
@@ -61,88 +61,6 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, _: serenity::model::gateway::Ready) {
         ctx.set_activity(Some(ActivityData::custom("The self splinters")));
-    }
-}
-
-async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
-    let mut ollama = Ollama::default();
-    if msg.content.eq("!unregister") {
-        if is_dm {
-            let _ = msg.reply(
-                &ctx.http,
-                "Sorry, you can't unregister in DMs\nIf you want to reset the chat use: `!amnesia`",
-            ).await;
-            return;
-        }
-        let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        chat_history.remove(&msg.channel_id.get());
-        let _ = msg.reply(&ctx.http, "Goodbye!").await;
-    } else if msg.content.starts_with("!amnesia") {
-        let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        chat_history.insert(msg.channel_id.get(), create_chat_history(&mut ollama).await);
-        let _ = msg.reply(&ctx.http, "Chat history has been reset!").await;
-    } else if msg.content.starts_with("!setprompt ") {
-        let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        let chat_history = chat_history
-            .entry(msg.channel_id.get())
-            .or_insert(create_chat_history(&mut ollama).await);
-        chat_history.retain(|m| m.role != MessageRole::System);
-        let _ = ollama
-            .send_chat_messages_with_history(
-                chat_history,
-                ChatMessageRequest::new(
-                    MODEL.to_string(),
-                    vec![ChatMessage::system(
-                        msg.content.split_once("!setprompt ").unwrap().1.to_string(),
-                    )],
-                ),
-            )
-            .await;
-        chat_history.pop();
-        let system_prompt = chat_history.pop().unwrap();
-        chat_history.insert(0, system_prompt);
-        let _ = msg.reply(&ctx.http, "System prompt set!").await;
-    } else if msg.content.starts_with("!nuke") {
-        let discord_chat_history =
-            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
-        tokio::spawn(async move {
-            for message in discord_chat_history {
-                if message.author.id == ctx.cache.current_user().id {
-                    let _ = message.delete(&ctx.http).await;
-                }
-            }
-            println!("Nuke done.");
-        });
-    } else if msg.content.starts_with("!supernuke") {
-        tokio::spawn(async move {
-            let discord_chat_history =
-                get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
-            let _ = msg.delete(&ctx.http).await;
-            for message in discord_chat_history {
-                let _ = message.delete(&ctx.http).await;
-            }
-            println!("Super nuke done.");
-        });
-    } else if msg.content.eq("!regenerate") {
-        let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        let chat_history = chat_history
-            .entry(msg.channel_id.get())
-            .or_insert(create_chat_history(&mut ollama).await);
-        chat_history.pop();
-        let response = ollama
-            .send_chat_messages_with_history(
-                chat_history,
-                ChatMessageRequest::new(MODEL.to_string(), vec![]),
-            )
-            .await;
-        let _ = msg
-            .channel_id
-            .say(&ctx.http, response.unwrap().message.content)
-            .await;
     }
 }
 
