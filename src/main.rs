@@ -108,20 +108,24 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
     } else if msg.content.starts_with("!nuke") {
         let discord_chat_history =
             get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
-        for message in discord_chat_history {
-            if message.author.id == ctx.cache.current_user().id {
+        tokio::spawn(async move {
+            for message in discord_chat_history {
+                if message.author.id == ctx.cache.current_user().id {
+                    let _ = message.delete(&ctx.http).await;
+                }
+            }
+            println!("Nuke done.");
+        });
+    } else if msg.content.starts_with("!supernuke") {
+        tokio::spawn(async move {
+            let discord_chat_history =
+                get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+            let _ = msg.delete(&ctx.http).await;
+            for message in discord_chat_history {
                 let _ = message.delete(&ctx.http).await;
             }
-        }
-        println!("Nuke done.");
-    } else if msg.content.starts_with("!supernuke") {
-        let discord_chat_history =
-            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
-        let _ = msg.delete(&ctx.http).await;
-        for message in discord_chat_history {
-            let _ = message.delete(&ctx.http).await;
-        }
-        println!("Super nuke done.");
+            println!("Super nuke done.");
+        });
     } else if msg.content.eq("!regenerate") {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
