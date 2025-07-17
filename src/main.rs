@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::env;
 
 use ollama_rs::Ollama;
-use ollama_rs::generation::chat::ChatMessage;
 use ollama_rs::generation::chat::request::ChatMessageRequest;
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 
 use serenity::all::{
     ActivityData, Channel, ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage,
@@ -89,6 +89,7 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
         let chat_history = chat_history
             .entry(msg.channel_id.get())
             .or_insert(create_chat_history(&mut ollama).await);
+        chat_history.retain(|m| m.role != MessageRole::System);
         let _ = ollama
             .send_chat_messages_with_history(
                 chat_history,
@@ -100,6 +101,9 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
                 ),
             )
             .await;
+        chat_history.pop();
+        let system_prompt = chat_history.pop().unwrap();
+        chat_history.insert(0, system_prompt);
         let _ = msg.reply(&ctx.http, "System prompt set!").await;
     } else if msg.content.starts_with("!nuke") {
         let discord_chat_history =
@@ -109,6 +113,7 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
                 let _ = message.delete(&ctx.http).await;
             }
         }
+        println!("Nuke done.");
     } else if msg.content.starts_with("!supernuke") {
         let discord_chat_history =
             get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
@@ -116,16 +121,24 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
         for message in discord_chat_history {
             let _ = message.delete(&ctx.http).await;
         }
+        println!("Super nuke done.");
     } else if msg.content.eq("!regenerate") {
-        {
-            let mut data = ctx.data.write().await;
-            let chat_history = data.get_mut::<ChatHistory>().unwrap();
-            let chat_history = chat_history
-                .entry(msg.channel_id.get())
-                .or_insert(create_chat_history(&mut ollama).await);
-            chat_history.pop();
-        }
-        let _ = send_message(ctx.clone(), msg, is_dm).await;
+        let mut data = ctx.data.write().await;
+        let chat_history = data.get_mut::<ChatHistory>().unwrap();
+        let chat_history = chat_history
+            .entry(msg.channel_id.get())
+            .or_insert(create_chat_history(&mut ollama).await);
+        chat_history.pop();
+        let response = ollama
+            .send_chat_messages_with_history(
+                chat_history,
+                ChatMessageRequest::new(MODEL.to_string(), vec![]),
+            )
+            .await;
+        let _ = msg
+            .channel_id
+            .say(&ctx.http, response.unwrap().message.content)
+            .await;
     }
 }
 
