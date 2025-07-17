@@ -6,8 +6,8 @@ use ollama_rs::generation::chat::ChatMessage;
 use ollama_rs::generation::chat::request::ChatMessageRequest;
 
 use serenity::all::{
-    ActivityData, Channel, CreateAllowedMentions, CreateAttachment, CreateMessage,
-    MessageReference, MessageReferenceKind,
+    ActivityData, Channel, ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage,
+    GetMessages, MessageId, MessageReference, MessageReferenceKind,
 };
 
 use serenity::async_trait;
@@ -97,7 +97,34 @@ async fn handle_command(ctx: Context, msg: Message, is_dm: bool) {
             )
             .await;
         let _ = msg.reply(&ctx.http, "System prompt set!").await;
+    } else if msg.content.starts_with("!nuke") {
+        let discord_chat_history =
+            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+        for message in discord_chat_history {
+            if message.author.id == ctx.cache.current_user().id {
+                let _ = message.delete(&ctx.http).await;
+            }
+        }
+    } else if msg.content.starts_with("!supernuke") {
+        let discord_chat_history =
+            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+        let _ = msg.delete(&ctx.http).await;
+        for message in discord_chat_history {
+            let _ = message.delete(&ctx.http).await;
+        }
     }
+}
+
+async fn get_older_discord_messages(
+    ctx: impl serenity::http::CacheHttp,
+    msg_id: MessageId,
+    channel_id: ChannelId,
+) -> Vec<Message> {
+    let chat_history_builder = GetMessages::new().before(msg_id).limit(100);
+    channel_id
+        .messages(ctx, chat_history_builder)
+        .await
+        .unwrap()
 }
 
 async fn send_message(ctx: Context, msg: Message, is_dm: bool) {
@@ -129,12 +156,23 @@ async fn send_message(ctx: Context, msg: Message, is_dm: bool) {
         )
         .await
     {
-        let message_builder = CreateMessage::new()
-            .reference_message(
-                MessageReference::new(MessageReferenceKind::Default, msg.channel_id)
-                    .message_id(msg.id),
-            )
-            .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()); // Make the reference not mention the user
+        let chat_history_builder = GetMessages::new().after(msg.id);
+        let new_messages = msg
+            .channel_id
+            .messages(&ctx.http, chat_history_builder)
+            .await
+            .unwrap();
+        let message_builder = CreateMessage::new();
+        let message_builder = if new_messages.len() >= 1 {
+            message_builder
+                .reference_message(
+                    MessageReference::new(MessageReferenceKind::Default, msg.channel_id)
+                        .message_id(msg.id),
+                )
+                .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()) // Make the reference not mention the user
+        } else {
+            message_builder
+        };
         let response = if res.message.content.len() > 2000 {
             message_builder.add_file(CreateAttachment::bytes(res.message.content, "reply.txt"))
         } else {
