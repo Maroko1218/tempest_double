@@ -96,12 +96,14 @@ async fn amnesia(ctx: Context, msg: Message) {
 }
 
 async fn nuke(ctx: Context, msg: Message) {
-    let discord_chat_history = get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
     tokio::spawn(async move {
-        for message in discord_chat_history {
-            if message.author.id == ctx.cache.current_user().id {
-                let _ = message.delete(&ctx.http).await;
-            }
+        let discord_chat_history =
+            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+        for message in discord_chat_history
+            .iter()
+            .filter(|m| m.author.id == ctx.cache.current_user().id)
+        {
+            let _ = message.delete(&ctx.http).await;
         }
         println!("Nuke done.");
     });
@@ -111,10 +113,11 @@ async fn super_nuke(ctx: Context, msg: Message) {
     tokio::spawn(async move {
         let discord_chat_history =
             get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+        let _ = msg
+            .channel_id
+            .delete_messages(&ctx.http, discord_chat_history)
+            .await;
         let _ = msg.delete(&ctx.http).await;
-        for message in discord_chat_history {
-            let _ = message.delete(&ctx.http).await;
-        }
         println!("Super nuke done.");
     });
 }
