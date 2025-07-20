@@ -1,11 +1,10 @@
 mod commands;
+mod ollama;
 
 use std::collections::HashMap;
 use std::env;
 
-use ollama_rs::Ollama;
 use ollama_rs::generation::chat::ChatMessage;
-use ollama_rs::generation::chat::request::ChatMessageRequest;
 
 use serenity::all::{
     ActivityData, Channel, ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage,
@@ -15,12 +14,13 @@ use serenity::all::{
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
+use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 
-static DEFAULT_PROMPT: &str = include_str!("prompt.txt");
+use crate::commands::{Command, handle_command, parse_commands};
+use crate::ollama::{create_chat_history, get_llm_response, set_system_prompt};
+
 const MODEL: &str = "llama3.1:latest";
-const EVALUATOR_MODEL: &str = "gemma3:4b";
-const EVALUATOR_PROMPT: &str =
-    "Decide if you want to reply to this conversation. Answer only with a Yes or a No.";
+const EVALUATOR_PROMPT: &str = "You are a helpful assistant. Your sole task is to determine if you should continue this conversation. Respond only with 'Yes' or 'No'. Do not provide any additional explanation, greetings, or commentary. Indicate your intent with a simple 'Yes' if you wish to continue, and 'No' if you do not.";
 
 struct ChatHistory;
 struct Handler;
@@ -41,45 +41,40 @@ impl EventHandler for Handler {
             Channel::Private(_) => true,
             _ => false,
         };
-        let possible_command = commands::parse_commands(msg.content.as_str());
+        let possible_command = parse_commands(msg.content.as_str());
 
         let is_registered = {
-            let data = ctx.data.write().await;
-            data.get::<ChatHistory>()
-                .unwrap()
-                .contains_key(&channel.id().get())
+            let data = ctx.data.read().await;
+            get_chat_history(&data, msg.channel_id.get()).is_some()
         };
-        if !is_dm
-            && !is_registered
-            && !matches!(possible_command, Some(commands::Command::Register))
-        {
+        if !is_dm && !is_registered && !matches!(possible_command, Some(Command::Register)) {
             return;
         }
 
         if possible_command.is_some() {
-            commands::handle_command(ctx.clone(), msg, possible_command.unwrap(), is_dm).await;
+            handle_command(ctx.clone(), msg.clone(), possible_command.unwrap()).await;
         } else {
-            let want_to_reply: bool = desire_to_respond(ctx.clone(), msg.clone(), is_dm).await;
-            println!("{}", want_to_reply);
+            let want_to_reply = if is_dm || msg.mentions_me(&ctx.http).await.unwrap() {
+                true
+            } else {
+                desire_to_respond(&ctx, msg.clone()).await
+            };
             if want_to_reply {
-                send_message(ctx.clone(), msg, is_dm).await;
+                send_message(ctx.clone(), msg).await;
             } else {
                 let mut data = ctx.data.write().await;
-                data.get_mut::<ChatHistory>()
-                    .unwrap()
-                    .entry(msg.channel_id.get())
-                    .and_modify(|history| {
-                        history.push(ChatMessage::user(if is_dm {
-                            msg.content
-                        } else {
-                            (match msg.author.global_name {
-                                Some(name) => name,
-                                None => msg.author.name,
-                            }) + " says: "
-                                + msg.content.as_str()
-                        }))
-                    });
+                let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+                chat_history.push(ChatMessage::user(if is_dm {
+                    msg.content
+                } else {
+                    (match msg.author.global_name {
+                        Some(name) => name,
+                        None => msg.author.name,
+                    }) + " says: "
+                        + msg.content.as_str()
+                }));
             }
+            ctx.set_activity(Some(ActivityData::custom("The self splinters")));
         }
     }
 
@@ -88,57 +83,16 @@ impl EventHandler for Handler {
     }
 }
 
-async fn desire_to_respond(ctx: Context, msg: Message, is_dm: bool) -> bool {
-    if is_dm {
-        return is_dm;
-    }
-    {
-        let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        let chat_history = chat_history
-            .entry(msg.channel_id.get())
-            .or_insert(create_chat_history().await);
-        let original_system_prompt = chat_history.remove(0);
-        let _ = Ollama::default()
-            .send_chat_messages_with_history(
-                chat_history,
-                ChatMessageRequest::new(
-                    MODEL.to_string(),
-                    vec![ChatMessage::system(EVALUATOR_PROMPT.to_owned())],
-                ),
-            )
-            .await;
-        chat_history.pop(); // remove empty LLM response
-        let evaluator_response = Ollama::default()
-            .send_chat_messages_with_history(
-                chat_history,
-                ChatMessageRequest::new(
-                    EVALUATOR_MODEL.to_owned(),
-                    vec![if is_dm {
-                        ChatMessage::user(msg.content)
-                    } else {
-                        ChatMessage::user(
-                            match msg.author.global_name {
-                                Some(name) => name,
-                                None => msg.author.name,
-                            } + " says: "
-                                + msg.content.as_str(),
-                        )
-                    }],
-                ),
-            )
-            .await
-            .unwrap();
-        println!("{:?}", chat_history.pop()); //Yes or no (hopefully)
-        chat_history.pop(); //User message
-        chat_history.pop(); //System prompt
-        chat_history.insert(0, original_system_prompt);
-        evaluator_response
-            .message
-            .content
-            .to_ascii_lowercase()
-            .contains("yes")
-    }
+async fn desire_to_respond(ctx: &Context, msg: Message) -> bool {
+    ctx.set_activity(Some(ActivityData::custom("Thinking...")));
+    let mut data = ctx.data.write().await;
+    let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+    let original_system_prompt = set_system_prompt(chat_history, EVALUATOR_PROMPT);
+    let evaluator_response = get_llm_response(chat_history, &msg, MODEL).await;
+    println!("{:?}", chat_history.pop()); //Yes or no (hopefully)
+    chat_history.pop(); //User message
+    set_system_prompt(chat_history, &original_system_prompt.content);
+    evaluator_response.to_ascii_lowercase().contains("yes")
 }
 
 async fn get_older_discord_messages(
@@ -153,79 +107,61 @@ async fn get_older_discord_messages(
         .unwrap()
 }
 
-async fn send_message(ctx: Context, msg: Message, is_dm: bool) {
+async fn send_message(ctx: Context, msg: Message) {
     let typing = ctx.http.start_typing(msg.channel_id);
-    let mut ollama = Ollama::default();
     let mut data = ctx.data.write().await;
-    let all_chat_history = data.get_mut::<ChatHistory>().unwrap();
-    let chat_history = all_chat_history
-        .entry(msg.channel_id.get())
-        .or_insert(create_chat_history().await);
+    let chat_history = data
+        .get_mut::<ChatHistory>()
+        .unwrap()
+        .get_mut(&msg.channel_id.get())
+        .unwrap();
 
-    if let Ok(res) = ollama
-        .send_chat_messages_with_history(
-            chat_history,
-            ChatMessageRequest::new(
-                MODEL.to_string(),
-                vec![if is_dm {
-                    ChatMessage::user(msg.content)
-                } else {
-                    ChatMessage::user(
-                        match msg.author.global_name {
-                            Some(name) => name,
-                            None => msg.author.name,
-                        } + " says: "
-                            + msg.content.as_str(),
-                    )
-                }],
-            ),
-        )
+    let response = get_llm_response(chat_history, &msg, MODEL).await;
+
+    let chat_history_builder = GetMessages::new().after(msg.id);
+    let new_messages = msg
+        .channel_id
+        .messages(&ctx.http, chat_history_builder)
         .await
-    {
-        let chat_history_builder = GetMessages::new().after(msg.id);
-        let new_messages = msg
-            .channel_id
-            .messages(&ctx.http, chat_history_builder)
-            .await
-            .unwrap();
-        let message_builder = CreateMessage::new();
-        let message_builder = if new_messages.len() >= 1 {
-            message_builder
-                .reference_message(
-                    MessageReference::new(MessageReferenceKind::Default, msg.channel_id)
-                        .message_id(msg.id),
-                )
-                .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()) // Make the reference not mention the user
-        } else {
-            message_builder
-        };
-        let response = if res.message.content.len() > 2000 {
-            message_builder.add_file(CreateAttachment::bytes(res.message.content, "reply.txt"))
-        } else {
-            message_builder.content(res.message.content)
-        };
-        if let Err(why) = msg.channel_id.send_message(&ctx.http, response).await {
-            println!("Couldn't send message: {why:?}");
-        }
+        .unwrap();
+    let message_builder = CreateMessage::new();
+    let message_builder = if new_messages.len() >= 1 {
+        message_builder
+            .reference_message(
+                MessageReference::new(MessageReferenceKind::Default, msg.channel_id)
+                    .message_id(msg.id),
+            )
+            .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()) // Make the reference not mention the user
+    } else {
+        message_builder
+    };
+    let response = if response.len() > 2000 {
+        message_builder.add_file(CreateAttachment::bytes(response, "reply.txt"))
+    } else {
+        message_builder.content(response)
+    };
+    if let Err(why) = msg.channel_id.send_message(&ctx.http, response).await {
+        println!("Couldn't send message: {why:?}");
     }
+
     typing.stop();
 }
 
-async fn create_chat_history() -> Vec<ChatMessage> {
-    let mut history = vec![];
-    if let Err(why) = Ollama::default()
-        .send_chat_messages_with_history(
-            &mut history,
-            ChatMessageRequest::new(
-                MODEL.to_string(),
-                vec![ChatMessage::system(DEFAULT_PROMPT.to_string())],
-            ),
-        )
-        .await
-    {
-        println!("Couldn't set system prompt: {why:?}");
-    }
-    history
+async fn get_mutable_chat_history<'a>(
+    data: &'a mut RwLockWriteGuard<'_, TypeMap>,
+    id: u64,
+) -> &'a mut Vec<ChatMessage> {
+    data.get_mut::<ChatHistory>()
+        .unwrap()
+        .entry(id)
+        .or_insert(create_chat_history().await)
+}
+
+fn get_chat_history<'a>(
+    data: &'a RwLockReadGuard<'_, TypeMap>,
+    id: u64,
+) -> Option<&'a Vec<ChatMessage>> {
+    data.get::<ChatHistory>().unwrap().get(&id)
 }
 
 #[tokio::main]

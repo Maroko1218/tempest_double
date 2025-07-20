@@ -1,20 +1,20 @@
-use ollama_rs::{
-    Ollama,
-    generation::chat::{ChatMessage, MessageRole, request::ChatMessageRequest},
-};
 use serenity::all::{Context, Message};
 
-use crate::{ChatHistory, create_chat_history, get_older_discord_messages};
+use crate::{
+    ChatHistory, create_chat_history, get_chat_history, get_mutable_chat_history,
+    get_older_discord_messages,
+    ollama::{get_llm_response, set_system_prompt},
+};
 
 const MODEL: &str = "llama3.1:latest";
 
-pub enum Command {
+pub enum Command<'a> {
     Register,
     Unregister,
     Amnesia,
     Nuke,
     SuperNuke,
-    SetPrompt(String),
+    SetPrompt(&'a str),
     Regenerate,
 }
 
@@ -26,44 +26,47 @@ pub fn parse_commands(message: &str) -> Option<Command> {
         "!nuke" => Command::Nuke,
         "!supernuke" => Command::SuperNuke,
         s if s.starts_with("!setprompt ") => {
-            Command::SetPrompt(s.split_once("!setprompt ").unwrap().1.to_string())
+            Command::SetPrompt(s.split_once("!setprompt ").unwrap().1)
         }
         "!regenerate" => Command::Regenerate,
         _ => return None,
     })
 }
 
-pub async fn handle_command(ctx: Context, msg: Message, command: Command, is_dm: bool) {
+pub async fn handle_command<'a>(ctx: Context, msg: Message, command: Command<'a>) {
     match command {
-        Command::Register => register(ctx, msg, is_dm).await,
-        Command::Unregister => unregister(ctx, msg, is_dm).await,
-        Command::Amnesia => amnesia(ctx, msg).await,
+        Command::Register => register(ctx, &msg).await,
+        Command::Unregister => unregister(ctx, &msg).await,
+        Command::Amnesia => amnesia(ctx, &msg).await,
         Command::Nuke => nuke(ctx, msg).await,
         Command::SuperNuke => super_nuke(ctx, msg).await,
-        Command::SetPrompt(prompt) => set_prompt(ctx, msg, prompt).await,
-        Command::Regenerate => regenerate(ctx, msg).await,
+        Command::SetPrompt(prompt) => set_prompt(ctx, &msg, prompt).await,
+        Command::Regenerate => regenerate(ctx, &msg).await,
     }
 }
 
-async fn register(ctx: Context, msg: Message, is_dm: bool) {
-    if is_dm {
+async fn register(ctx: Context, msg: &Message) {
+    if msg.guild_id == None {
         let _ = msg
             .reply(&ctx.http, "I will always reply to our private messages!")
             .await;
         return;
     }
-    let mut data = ctx.data.write().await;
-    let chat_history = data.get_mut::<ChatHistory>().unwrap();
-    if !chat_history.contains_key(&msg.channel_id.get()) {
-        chat_history.insert(msg.channel_id.get(), create_chat_history().await);
+    let is_already_registered = {
+        let data = ctx.data.read().await;
+        get_chat_history(&data, msg.channel_id.get()).is_some()
+    };
+    if !is_already_registered {
+        let mut data = ctx.data.write().await;
+        get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
         let _ = msg
             .reply(&ctx.http, "I will now respond to messages in this channel!")
             .await;
     }
 }
 
-async fn unregister(ctx: Context, msg: Message, is_dm: bool) {
-    if is_dm {
+async fn unregister(ctx: Context, msg: &Message) {
+    if msg.guild_id == None {
         let _ = msg
             .reply(
                 &ctx.http,
@@ -80,7 +83,7 @@ async fn unregister(ctx: Context, msg: Message, is_dm: bool) {
     let _ = msg.reply(&ctx.http, "Goodbye!").await;
 }
 
-async fn amnesia(ctx: Context, msg: Message) {
+async fn amnesia(ctx: Context, msg: &Message) {
     {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
@@ -112,48 +115,24 @@ async fn super_nuke(ctx: Context, msg: Message) {
             .delete_messages(&ctx.http, discord_chat_history)
             .await;
         let _ = msg.delete(&ctx.http).await;
-        println!("Super nuke done.");
     });
 }
 
-async fn set_prompt(ctx: Context, msg: Message, prompt: String) {
+async fn set_prompt(ctx: Context, msg: &Message, prompt: &str) {
     {
         let mut data = ctx.data.write().await;
-        let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        let chat_history = chat_history
-            .entry(msg.channel_id.get())
-            .or_insert(create_chat_history().await);
-        chat_history.retain(|m| m.role != MessageRole::System);
-        let _ = Ollama::default()
-            .send_chat_messages_with_history(
-                chat_history,
-                ChatMessageRequest::new(MODEL.to_string(), vec![ChatMessage::system(prompt)]),
-            )
-            .await;
-        chat_history.pop(); // remove empty LLM response
-        let system_prompt = chat_history.pop().unwrap(); // Get the system prompt and move it to the start of the chat history
-        chat_history.insert(0, system_prompt);
+        let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+        set_system_prompt(chat_history, prompt);
     }
     let _ = msg.reply(&ctx.http, "System prompt set!").await;
 }
 
-async fn regenerate(ctx: Context, msg: Message) {
-    let mut data = ctx.data.write().await;
-    let chat_history = data
-        .get_mut::<ChatHistory>()
-        .unwrap()
-        .entry(msg.channel_id.get())
-        .or_insert(create_chat_history().await);
-
-    chat_history.pop();
-    let response = Ollama::default()
-        .send_chat_messages_with_history(
-            chat_history,
-            ChatMessageRequest::new(MODEL.to_string(), vec![]),
-        )
-        .await;
-    let _ = msg
-        .channel_id
-        .say(&ctx.http, response.unwrap().message.content)
-        .await;
+async fn regenerate(ctx: Context, msg: &Message) {
+    let response = {
+        let mut data = ctx.data.write().await;
+        let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+        chat_history.pop();
+        get_llm_response(chat_history, msg, MODEL).await
+    };
+    let _ = msg.channel_id.say(&ctx.http, response).await;
 }
