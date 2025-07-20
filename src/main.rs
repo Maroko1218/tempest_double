@@ -110,11 +110,7 @@ async fn get_older_discord_messages(
 async fn send_message(ctx: Context, msg: Message) {
     let typing = ctx.http.start_typing(msg.channel_id);
     let mut data = ctx.data.write().await;
-    let chat_history = data
-        .get_mut::<ChatHistory>()
-        .unwrap()
-        .get_mut(&msg.channel_id.get())
-        .unwrap();
+    let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
 
     let response = get_llm_response(chat_history, &msg, MODEL).await;
 
