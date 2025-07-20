@@ -55,10 +55,7 @@ async fn register(ctx: Context, msg: Message, is_dm: bool) {
     let mut data = ctx.data.write().await;
     let chat_history = data.get_mut::<ChatHistory>().unwrap();
     if !chat_history.contains_key(&msg.channel_id.get()) {
-        chat_history.insert(
-            msg.channel_id.get(),
-            create_chat_history(&mut Ollama::default()).await,
-        );
+        chat_history.insert(msg.channel_id.get(), create_chat_history().await);
         let _ = msg
             .reply(&ctx.http, "I will now respond to messages in this channel!")
             .await;
@@ -87,10 +84,7 @@ async fn amnesia(ctx: Context, msg: Message) {
     {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        chat_history.insert(
-            msg.channel_id.get(),
-            create_chat_history(&mut Ollama::default()).await,
-        );
+        chat_history.insert(msg.channel_id.get(), create_chat_history().await);
     }
     let _ = msg.reply(&ctx.http, "Chat history has been reset!").await;
 }
@@ -128,7 +122,7 @@ async fn set_prompt(ctx: Context, msg: Message, prompt: String) {
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
         let chat_history = chat_history
             .entry(msg.channel_id.get())
-            .or_insert(create_chat_history(&mut Ollama::default()).await);
+            .or_insert(create_chat_history().await);
         chat_history.retain(|m| m.role != MessageRole::System);
         let _ = Ollama::default()
             .send_chat_messages_with_history(
@@ -149,7 +143,7 @@ async fn regenerate(ctx: Context, msg: Message) {
         .get_mut::<ChatHistory>()
         .unwrap()
         .entry(msg.channel_id.get())
-        .or_insert(create_chat_history(&mut Ollama::default()).await);
+        .or_insert(create_chat_history().await);
 
     chat_history.pop();
     let response = Ollama::default()
