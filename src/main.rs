@@ -91,7 +91,7 @@ async fn desire_to_respond(ctx: &Context, msg: Message) -> bool {
     let evaluator_response = get_llm_response(chat_history, &msg, MODEL).await;
     println!("{:?}", chat_history.pop()); //Yes or no (hopefully)
     chat_history.pop(); //User message
-    set_system_prompt(chat_history, &original_system_prompt.content);
+    chat_history[0] = original_system_prompt;
     evaluator_response.to_ascii_lowercase().contains("yes")
 }
 

@@ -8,8 +8,8 @@ static DEFAULT_PROMPT: &str = include_str!("prompt.txt");
 
 pub fn set_system_prompt(chat_history: &mut Vec<ChatMessage>, prompt: &str) -> ChatMessage {
     //Sets a new system prompt, returning the old one
-    let old_prompt = chat_history.remove(0); // We always keep the system prompt as the first message
-    chat_history.insert(0, ChatMessage::system(prompt.to_string()));
+    let old_prompt = chat_history[0].to_owned(); // We always keep the system prompt as the first message
+    chat_history[0] = ChatMessage::system(prompt.to_string());
     old_prompt
 }
 
