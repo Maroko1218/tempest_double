@@ -17,7 +17,9 @@ use serenity::prelude::*;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use crate::commands::{Command, handle_command, parse_commands};
-use crate::ollama::{create_chat_history, get_llm_response, set_system_prompt};
+use crate::ollama::{
+    create_chat_history, get_llm_response, load_chat_history, save_chat_history, set_system_prompt,
+};
 
 const MODEL: &str = "llama3.1:latest";
 const EVALUATOR_PROMPT: &str = "You are a helpful assistant. Your sole task is to determine if you should continue this conversation. Respond only with 'Yes' or 'No'. Do not provide any additional explanation, greetings, or commentary. Indicate your intent with a simple 'Yes' if you wish to continue, and 'No' if you do not.";
@@ -76,6 +78,7 @@ impl EventHandler for Handler {
             }
             ctx.set_activity(Some(ActivityData::custom("The self splinters")));
         }
+        save_chat_history(ctx.data.write().await.get_mut::<ChatHistory>().unwrap()).await
     }
 
     async fn ready(&self, ctx: Context, _: serenity::model::gateway::Ready) {
@@ -174,7 +177,7 @@ async fn main() {
         .expect("Err creating client");
     {
         let mut data = client.data.write().await;
-        data.insert::<ChatHistory>(HashMap::default());
+        data.insert::<ChatHistory>(load_chat_history().await);
     }
 
     // Start listening for events by starting a single shard
