@@ -1,8 +1,11 @@
-use serenity::all::{Context, Message};
+use serenity::all::{
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseMessage,
+};
 
 use crate::{
-    ChatHistory, create_chat_history, get_chat_history, get_mutable_chat_history,
-    get_older_discord_messages,
+    ChatHistory, create_chat_history, get_chat_history, get_discord_messages,
+    get_mutable_chat_history,
     ollama::{get_llm_response, set_system_prompt},
 };
 
@@ -18,58 +21,68 @@ pub enum Command<'a> {
     Regenerate,
 }
 
-pub fn parse_commands(message: &str) -> Option<Command> {
-    Some(match message {
-        "!register" => Command::Register,
-        "!unregister" => Command::Unregister,
-        "!amnesia" => Command::Amnesia,
-        "!nuke" => Command::Nuke,
-        "!supernuke" => Command::SuperNuke,
-        s if s.starts_with("!setprompt ") => {
-            Command::SetPrompt(s.split_once("!setprompt ").unwrap().1)
-        }
+pub fn parse_commands(command: &CommandInteraction) -> Option<Command> {
+    Some(match command.data.name.as_str() {
+        "register" => Command::Register,
+        "unregister" => Command::Unregister,
+        "amnesia" => Command::Amnesia,
+        "nuke" => Command::Nuke,
+        "supernuke" => Command::SuperNuke,
+        "setprompt" => Command::SetPrompt(command.data.options[0].value.as_str().unwrap()),
         "!regenerate" => Command::Regenerate,
         _ => return None,
     })
 }
 
-pub async fn handle_command<'a>(ctx: Context, msg: Message, command: Command<'a>) {
-    match command {
-        Command::Register => register(ctx, &msg).await,
-        Command::Unregister => unregister(ctx, &msg).await,
-        Command::Amnesia => amnesia(ctx, &msg).await,
-        Command::Nuke => nuke(ctx, msg).await,
-        Command::SuperNuke => super_nuke(ctx, msg).await,
-        Command::SetPrompt(prompt) => set_prompt(ctx, &msg, prompt).await,
-        Command::Regenerate => regenerate(ctx, &msg).await,
+pub async fn handle_command<'a>(
+    ctx: Context,
+    command: &CommandInteraction,
+    command_type: Command<'a>,
+) {
+    match command_type {
+        Command::Register => register(ctx, command).await,
+        Command::Unregister => unregister(ctx, command).await,
+        Command::Amnesia => amnesia(ctx, command).await,
+        Command::Nuke => nuke(ctx, command.clone()).await,
+        Command::SuperNuke => super_nuke(ctx, command).await,
+        Command::SetPrompt(prompt) => set_prompt(ctx, command, prompt).await,
+        Command::Regenerate => regenerate(ctx, command).await,
     }
 }
 
-async fn register(ctx: Context, msg: &Message) {
-    if msg.guild_id == None {
-        let _ = msg
-            .reply(&ctx.http, "I will always reply to our private messages!")
-            .await;
+async fn register(ctx: Context, command: &CommandInteraction) {
+    if command.guild_id == None {
+        reply_to_command(
+            &ctx,
+            &command,
+            "I will always reply to our private messages!",
+        )
+        .await;
         return;
     }
     let is_already_registered = {
         let data = ctx.data.read().await;
-        get_chat_history(&data, msg.channel_id.get()).is_some()
+        get_chat_history(&data, command.channel_id.get()).is_some()
     };
     if !is_already_registered {
         let mut data = ctx.data.write().await;
-        get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
-        let _ = msg
-            .reply(&ctx.http, "I will now respond to messages in this channel!")
-            .await;
+        get_mutable_chat_history(&mut data, command.channel_id.get()).await;
+        reply_to_command(
+            &ctx,
+            command,
+            "I will now respond to messages in this channel!",
+        )
+        .await;
+    } else {
+        reply_to_command(&ctx, command, "Already registered!").await;
     }
 }
 
-async fn unregister(ctx: Context, msg: &Message) {
-    if msg.guild_id == None {
-        let _ = msg
-            .reply(
-                &ctx.http,
+async fn unregister(ctx: Context, command: &CommandInteraction) {
+    if command.guild_id == None {
+        reply_to_command(
+                &ctx,
+                command,
                 "Sorry, you can't unregister in DMs\nBut, if you want to reset the chat you can use: `!amnesia`",
             )
             .await;
@@ -78,61 +91,92 @@ async fn unregister(ctx: Context, msg: &Message) {
     {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        chat_history.remove(&msg.channel_id.get());
+        chat_history.remove(&command.channel_id.get());
     }
-    let _ = msg.reply(&ctx.http, "Goodbye!").await;
+    reply_to_command(&ctx, command, "Goodbye!").await;
 }
 
-async fn amnesia(ctx: Context, msg: &Message) {
+async fn amnesia(ctx: Context, command: &CommandInteraction) {
     {
         let mut data = ctx.data.write().await;
         let chat_history = data.get_mut::<ChatHistory>().unwrap();
-        chat_history.insert(msg.channel_id.get(), create_chat_history().await);
+        chat_history.insert(command.channel_id.get(), create_chat_history().await);
     }
-    let _ = msg.reply(&ctx.http, "Chat history has been reset!").await;
+    reply_to_command(&ctx, command, "Chat history has been reset!").await;
 }
 
-async fn nuke(ctx: Context, msg: Message) {
+async fn nuke(ctx: Context, command: CommandInteraction) {
     tokio::spawn(async move {
-        let discord_chat_history =
-            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
+        let discord_chat_history = get_discord_messages(&ctx.http, command.channel_id).await;
         for message in discord_chat_history
             .iter()
             .filter(|m| m.author.id == ctx.cache.current_user().id)
         {
             let _ = message.delete(&ctx.http).await;
         }
-        println!("Nuke done.");
+        reply_to_command(&ctx, &command, "Nuke done.").await;
     });
 }
 
-async fn super_nuke(ctx: Context, msg: Message) {
-    tokio::spawn(async move {
-        let discord_chat_history =
-            get_older_discord_messages(&ctx.http, msg.id, msg.channel_id).await;
-        let _ = msg
-            .channel_id
-            .delete_messages(&ctx.http, discord_chat_history)
-            .await;
-        let _ = msg.delete(&ctx.http).await;
-    });
+async fn super_nuke(ctx: Context, command: &CommandInteraction) {
+    let discord_chat_history = get_discord_messages(&ctx.http, command.channel_id).await;
+    let _ = command
+        .channel_id
+        .delete_messages(&ctx.http, discord_chat_history)
+        .await;
+    reply_to_command(&ctx, command, "Nuke done.").await;
 }
 
-async fn set_prompt(ctx: Context, msg: &Message, prompt: &str) {
+async fn set_prompt(ctx: Context, command: &CommandInteraction, prompt: &str) {
     {
         let mut data = ctx.data.write().await;
-        let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+        let chat_history = get_mutable_chat_history(&mut data, command.channel_id.get()).await;
         set_system_prompt(chat_history, prompt);
     }
-    let _ = msg.reply(&ctx.http, "System prompt set!").await;
+    reply_to_command(&ctx, command, "System prompt set!").await;
 }
 
-async fn regenerate(ctx: Context, msg: &Message) {
+async fn regenerate(ctx: Context, command: &CommandInteraction) {
     let response = {
         let mut data = ctx.data.write().await;
-        let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+        let chat_history = get_mutable_chat_history(&mut data, command.channel_id.get()).await;
         chat_history.pop();
-        get_llm_response(chat_history, msg, MODEL).await
+        get_llm_response(chat_history, MODEL).await
     };
-    let _ = msg.channel_id.say(&ctx.http, response).await;
+    let _ = command.channel_id.say(&ctx.http, response).await;
+}
+
+async fn reply_to_command(ctx: &Context, command: &CommandInteraction, message: &str) {
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(message)
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+pub fn register_commands() -> Vec<CreateCommand> {
+    vec![
+        CreateCommand::new("register")
+            .description("Make the bot respond to the registered channel"),
+        CreateCommand::new("unregister").description("Remove the bot from the channel"),
+        CreateCommand::new("amnesia").description("Reset the chat bots chat history"),
+        CreateCommand::new("setprompt")
+            .description("Set a new prompt for the channe")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "prompt",
+                    "The new system prompt for the bot",
+                )
+                .required(true),
+            ),
+        CreateCommand::new("nuke").description("Remove the bots own messages"),
+        CreateCommand::new("supernuke").description("Remove 100 messages from the current channel"),
+        CreateCommand::new("regenerate").description("Generate a new answer to the latest message"),
+    ]
 }

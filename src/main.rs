@@ -7,8 +7,8 @@ use std::env;
 use ollama_rs::generation::chat::ChatMessage;
 
 use serenity::all::{
-    ActivityData, Channel, ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage,
-    GetMessages, MessageId, MessageReference, MessageReferenceKind,
+    ActivityData, Channel, ChannelId, Command, CreateAllowedMentions, CreateAttachment,
+    CreateMessage, GetMessages, Interaction, MessageReference, MessageReferenceKind,
 };
 
 use serenity::async_trait;
@@ -16,7 +16,7 @@ use serenity::model::channel::Message;
 use serenity::prelude::*;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 
-use crate::commands::{Command, handle_command, parse_commands};
+use crate::commands::{handle_command, parse_commands};
 use crate::ollama::{
     create_chat_history, get_llm_response, load_chat_history, save_chat_history, set_system_prompt,
 };
@@ -33,6 +33,16 @@ impl TypeMapKey for ChatHistory {
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(command) = interaction {
+            let possible_command = parse_commands(&command);
+            match possible_command {
+                Some(command_type) => handle_command(ctx.clone(), &command, command_type).await,
+                _ => (),
+            }
+        }
+    }
+
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.id == ctx.cache.current_user().id {
             return;
@@ -43,46 +53,45 @@ impl EventHandler for Handler {
             Channel::Private(_) => true,
             _ => false,
         };
-        let possible_command = parse_commands(msg.content.as_str());
 
         let is_registered = {
             let data = ctx.data.read().await;
             get_chat_history(&data, msg.channel_id.get()).is_some()
         };
-        if !is_dm && !is_registered && !matches!(possible_command, Some(Command::Register)) {
+        if !is_dm && !is_registered {
             return;
         }
 
-        if possible_command.is_some() {
-            handle_command(ctx.clone(), msg.clone(), possible_command.unwrap()).await;
+        let want_to_reply = if is_dm || msg.mentions_me(&ctx.http).await.unwrap() {
+            true
         } else {
-            let want_to_reply = if is_dm || msg.mentions_me(&ctx.http).await.unwrap() {
-                true
+            desire_to_respond(&ctx, msg.clone()).await
+        };
+        if want_to_reply {
+            send_message(ctx.clone(), msg).await;
+        } else {
+            let mut data = ctx.data.write().await;
+            let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
+            chat_history.push(ChatMessage::user(if is_dm {
+                msg.content
             } else {
-                desire_to_respond(&ctx, msg.clone()).await
-            };
-            if want_to_reply {
-                send_message(ctx.clone(), msg).await;
-            } else {
-                let mut data = ctx.data.write().await;
-                let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
-                chat_history.push(ChatMessage::user(if is_dm {
-                    msg.content
-                } else {
-                    (match msg.author.global_name {
-                        Some(name) => name,
-                        None => msg.author.name,
-                    }) + " says: "
-                        + msg.content.as_str()
-                }));
-            }
-            ctx.set_activity(Some(ActivityData::custom("The self splinters")));
+                (match msg.author.global_name {
+                    Some(name) => name,
+                    None => msg.author.name,
+                }) + " says: "
+                    + msg.content.as_str()
+            }));
         }
+        ctx.set_activity(Some(ActivityData::custom("The self splinters")));
+
         save_chat_history(ctx.data.write().await.get_mut::<ChatHistory>().unwrap()).await
     }
 
     async fn ready(&self, ctx: Context, _: serenity::model::gateway::Ready) {
         ctx.set_activity(Some(ActivityData::custom("The self splinters")));
+        for command in commands::register_commands() {
+            let _ = Command::create_global_command(&ctx.http, command).await;
+        }
     }
 }
 
@@ -91,19 +100,27 @@ async fn desire_to_respond(ctx: &Context, msg: Message) -> bool {
     let mut data = ctx.data.write().await;
     let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
     let original_system_prompt = set_system_prompt(chat_history, EVALUATOR_PROMPT);
-    let evaluator_response = get_llm_response(chat_history, &msg, MODEL).await;
+    chat_history.push(ChatMessage::user(if msg.guild_id == None {
+        msg.content.clone()
+    } else {
+        (match msg.author.global_name.clone() {
+            Some(name) => name,
+            None => msg.author.name.clone(),
+        }) + " says: "
+            + msg.content.as_str()
+    }));
+    let evaluator_response = get_llm_response(chat_history, MODEL).await;
     println!("{:?}", chat_history.pop()); //Yes or no (hopefully)
     chat_history.pop(); //User message
     chat_history[0] = original_system_prompt;
     evaluator_response.to_ascii_lowercase().contains("yes")
 }
 
-async fn get_older_discord_messages(
+async fn get_discord_messages(
     ctx: impl serenity::http::CacheHttp,
-    msg_id: MessageId,
     channel_id: ChannelId,
 ) -> Vec<Message> {
-    let chat_history_builder = GetMessages::new().before(msg_id).limit(100);
+    let chat_history_builder = GetMessages::new().limit(100);
     channel_id
         .messages(ctx, chat_history_builder)
         .await
@@ -114,8 +131,16 @@ async fn send_message(ctx: Context, msg: Message) {
     let typing = ctx.http.start_typing(msg.channel_id);
     let mut data = ctx.data.write().await;
     let chat_history = get_mutable_chat_history(&mut data, msg.channel_id.get()).await;
-
-    let response = get_llm_response(chat_history, &msg, MODEL).await;
+    chat_history.push(ChatMessage::user(if msg.guild_id == None {
+        msg.content.clone()
+    } else {
+        (match msg.author.global_name.clone() {
+            Some(name) => name,
+            None => msg.author.name.clone(),
+        }) + " says: "
+            + msg.content.as_str()
+    }));
+    let response = get_llm_response(chat_history, MODEL).await;
 
     let chat_history_builder = GetMessages::new().after(msg.id);
     let new_messages = msg
