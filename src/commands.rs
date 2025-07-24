@@ -29,7 +29,7 @@ pub fn parse_commands(command: &CommandInteraction) -> Option<Command> {
         "nuke" => Command::Nuke,
         "supernuke" => Command::SuperNuke,
         "setprompt" => Command::SetPrompt(command.data.options[0].value.as_str().unwrap()),
-        "!regenerate" => Command::Regenerate,
+        "regenerate" => Command::Regenerate,
         _ => return None,
     })
 }
