@@ -51,7 +51,7 @@ pub async fn create_chat_history() -> Vec<ChatMessage> {
     vec![ChatMessage::system(DEFAULT_PROMPT.to_string())]
 }
 
-pub async fn save_chat_history(all_history: &mut HashMap<u64, Vec<ChatMessage>>) {
+pub async fn save_chat_history(all_history: &HashMap<u64, Vec<ChatMessage>>) {
     let mut file = File::create(HISTORY_FILE_NAME).await.unwrap();
     file.write_all(serde_json::to_string(&all_history).unwrap().as_bytes())
         .await
