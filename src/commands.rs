@@ -9,8 +9,6 @@ use crate::{
     ollama::{get_llm_response, set_system_prompt},
 };
 
-const MODEL: &str = "llama3.1:latest";
-
 pub enum Command<'a> {
     Register,
     Unregister,
@@ -140,8 +138,10 @@ async fn regenerate(ctx: Context, command: &CommandInteraction) {
     let response = {
         let mut data = ctx.data.write().await;
         let chat_history = get_mutable_chat_history(&mut data, command.channel_id.get()).await;
-        chat_history.pop();
-        get_llm_response(chat_history, MODEL).await
+        if chat_history.len() > 1 {
+            chat_history.pop();
+        }
+        get_llm_response(chat_history).await
     };
     let _ = command.channel_id.say(&ctx.http, response).await;
 }
